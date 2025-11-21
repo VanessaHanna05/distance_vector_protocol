@@ -1,0 +1,75 @@
+
+# Neighbor Detection – How to Run
+
+This project implements a simple neighbor detection protocol in C using UDP broadcast.  
+Below are the minimal steps to compile and simulate three routers on one machine.
+
+## 1. Compile
+
+From the project directory:
+
+```bash
+gcc -Wall -Wextra -pthread part1.c -o part1
+````
+
+This creates the executable `part1`.
+
+## 2. Set up the virtual routers
+
+The script `setup_routers.sh` creates three Linux network namespaces (r1, r2, r3) and connects them.
+
+```bash
+chmod +x setup_routers.sh
+./setup_routers.sh
+```
+
+## 3. Add broadcast routes
+
+The program sends to `255.255.255.255`. Add a route for this inside each namespace:
+
+```bash
+sudo ip netns exec r1 ip route add 255.255.255.255 dev veth-r1
+sudo ip netns exec r2 ip route add 255.255.255.255 dev veth-r2
+sudo ip netns exec r3 ip route add 255.255.255.255 dev veth-r3
+```
+
+## 4. Run the three routers (three terminals)
+
+Open three terminals (or three VS Code terminals), all in the project directory.
+
+Terminal 1:
+
+```bash
+sudo ip netns exec r1 ./part1
+```
+
+Terminal 2:
+
+```bash
+sudo ip netns exec r2 ./part1
+```
+
+Terminal 3:
+
+```bash
+sudo ip netns exec r3 ./part1
+```
+
+Each instance will print its local IP, send HELLO messages, and show discovered neighbors.
+
+## 5. Test neighbor timeout (optional)
+
+Stop one router (for example, the `r3` terminal) with `Ctrl+C`.
+After about 10 seconds, the other routers should print that `10.0.0.3` timed out.
+
+## 6. Clean up
+
+When finished, remove the namespaces and virtual network:
+
+```bash
+chmod +x cleanup_routers.sh
+./cleanup_routers.sh
+```
+
+This deletes r1, r2, r3 and the virtual interfaces.
+
