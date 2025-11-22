@@ -4,6 +4,7 @@
 This project implements a simple neighbor detection protocol in C using UDP broadcast.  
 Below are the minimal steps to compile and simulate three routers on one machine.
 
+# Technique 1: 
 ## 1. Compile
 
 From the project directory:
@@ -72,4 +73,27 @@ chmod +x cleanup_routers.sh
 ```
 
 This deletes r1, r2, r3 and the virtual interfaces.
+
+# Technique 2: 
+run in the terminal to compile:
+
+```bash
+make
+```
+
+run in the terminal to run and prepare everything in one command: 
+
+```bash
+make run-all
+```
+to terminal click: ctrl + C
+
+run in the terminal to teardown everything in one command: 
+
+```bash
+make teardown
+```
+```bash
+make clean
+```
 
