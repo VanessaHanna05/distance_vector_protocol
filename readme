@@ -1,99 +1,93 @@
+# Distance Vector Routing – Part 2  
+This repository contains the implementation of **Part 2** of a Distance Vector (DV) routing protocol, as required in the Computer Networking lab (Learning-Flow #4a).
 
-# Neighbor Detection – How to Run
+Part 2 is intentionally kept **separate** from Part 1 so each component can be developed, tested, and evaluated independently before final integration.
 
-This project implements a simple neighbor detection protocol in C using UDP broadcast.  
-Below are the minimal steps to compile and simulate three routers on one machine.
+## Overview
 
-# Technique 1: 
-## 1. Compile
+The full DV routing protocol consists of several independent subsystems:
 
-From the project directory:
+### ✔ Part 1: Neighbour Detection  
+Implemented previously in `part1.c` (on another branch).  
+It is responsible for:
+- Broadcasting HELLO messages every 5 seconds  
+- Receiving HELLOs from neighbors  
+- Detecting link failures (timeout after 10 seconds)  
+- Maintaining a **Neighbour Table**  
+- Ensuring threads do not block and can run concurrently  
 
-```bash
-gcc -Wall -Wextra -pthread part1.c -o part1
-````
+Part 1 deals *purely* with discovering which routers are directly connected.
 
-This creates the executable `part1`.
+---
 
-## 2. Set up the virtual routers
+### ✔ Part 2: Distance Table and Distance Vector Processing  
+This branch implements the **Distance Table subsystem**, containing:
 
-The script `setup_routers.sh` creates three Linux network namespaces (r1, r2, r3) and connects them.
+#### **1. Distance Table Data Structure**
+A dynamic multi entry routing table:
+Destination → [(via_neighbor, cost), (via_neighbor2, cost2), ...]
 
-```bash
-chmod +x setup_routers.sh
-./setup_routers.sh
-```
+Internally stored as:
+- A list of destinations  
+- For each destination: a list of routes and costs via different neighbors  
 
-## 3. Add broadcast routes
+#### **2. Distance Vector Generation**  
+Function:
+char* getDistanceVector();
+Produces a DV string in the required format:
+myIP:DV:(dest1,cost1):(dest2,cost2):(dest3,cost3):
 
-The program sends to `255.255.255.255`. Add a route for this inside each namespace:
+This string is:
+- Allocated using `malloc`
+- Ready to be sent via UDP (Part 3)
+- Uses the best known cost (shortest path) for each destination
 
-```bash
-sudo ip netns exec r1 ip route add 255.255.255.255 dev veth-r1
-sudo ip netns exec r2 ip route add 255.255.255.255 dev veth-r2
-sudo ip netns exec r3 ip route add 255.255.255.255 dev veth-r3
-```
+#### **3. Processing Incoming Distance Vectors**
+Function:
 
-## 4. Run the three routers (three terminals)
+Parses incoming DV messages and updates:
+- Routes to destinations  
+- Costs via the sender  
+- Triggers DV update events if shortest paths change  
 
-Open three terminals (or three VS Code terminals), all in the project directory.
+All updates follow the rule:
+distance_to_dest_via_sender = received_cost + 1
 
-Terminal 1:
+#### **4. Update Notification Logic**
+Two provided hooks:
+void dvUpdate(); // invoked whenever shortest path changes
+void dvSent(); // used to clear update flag after sending
 
-```bash
-sudo ip netns exec r1 ./part1
-```
+These will be used later in Part 3 to decide when to broadcast updated vectors.
 
-Terminal 2:
+---
 
-```bash
-sudo ip netns exec r2 ./part1
-```
+## Files
 
-Terminal 3:
+### `part2.c`
+Contains:
+- Distance table implementation  
+- Route insertion and update logic  
+- DV serialization  
+- DV parsing  
+- Mutex protection for thread safety  
+- Optional test main (enabled using -DTEST_PART2)
 
-```bash
-sudo ip netns exec r3 ./part1
-```
+### `Makefile`
+Builds:
+- `part2` (without test main)
+- `part2_test` (with internal test main enabled)
 
-Each instance will print its local IP, send HELLO messages, and show discovered neighbors.
+---
 
-## 5. Test neighbor timeout (optional)
+## How to Compile
 
-Stop one router (for example, the `r3` terminal) with `Ctrl+C`.
-After about 10 seconds, the other routers should print that `10.0.0.3` timed out.
-
-## 6. Clean up
-
-When finished, remove the namespaces and virtual network:
-
-```bash
-chmod +x cleanup_routers.sh
-./cleanup_routers.sh
-```
-
-This deletes r1, r2, r3 and the virtual interfaces.
-
-# Technique 2: 
-run in the terminal to compile:
-
+### Build the standard Part 2 module:
 ```bash
 make
-```
-
-run in the terminal to run and prepare everything in one command: 
-
-```bash
-make run-all
-```
-to terminal click: ctrl + C
-
-run in the terminal to teardown everything in one command: 
-
-```bash
-make teardown
-```
-```bash
-make clean
-```
-
+This creates:
+./part2
+Build the module with the test main enabled:
+make test
+This produces:
+./part2_test
