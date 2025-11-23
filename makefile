@@ -1,4 +1,3 @@
-```makefile
 CC = gcc
 CFLAGS = -Wall -Wextra -pthread
 TARGET = part2
