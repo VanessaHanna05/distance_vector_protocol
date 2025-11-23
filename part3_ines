@@ -1,0 +1,316 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <ifaddrs.h>
+#include <pthread.h>
+#include <time.h>
+#include <net/if.h>
+
+#ifndef IFF_LOOPBACK
+//Linux use 0x8 for IFF_LOOPBACK
+#define IFF_LOOPBACK 0x0008
+#endif
+
+#define HELLO_INTERVAL 5
+#define TIMEOUT 10
+#define PORT 5555
+#define BUF_SIZE 1024
+
+//From part 2 
+extern void set_my_ip(const char *ip); 
+extern char* getDistanceVector(void); //This gives "<myIP>:DV:(dest,cost):..."
+extern void processDistanceVector(char *msg); //To parse & update DT (calls dvUpdate internally)
+extern void dvSent(void); //To clear “changed” flag
+extern int isDvUpdated(void); //We will get non-zero if best paths changed
+extern void updateRoute(const char *dest, const char *via, int cost);
+extern void removeAllRoutesVia(const char *via);
+
+//Neighbour table (from part 1)
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    uint16_t last_seq;
+    time_t last_time;
+} Neighbor;
+
+static Neighbor *neigh_table= NULL;
+static int neigh_count= 0;
+static int neigh_capacity= 0;
+
+static pthread_mutex_t neigh_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+//Globals from part 1
+static char my_ip[INET_ADDRSTRLEN] = {0};
+static uint16_t my_seq = 0;
+static int sockfd;
+
+void add_or_update_neighbor(const char *ip, uint16_t seq) {
+    // this function adds the neighbor if it is new (so its ip address is already in the array of neighbors, or it updates the sequence number of the neighbor)
+    // it takes the ip address of the neighbor and its sequence number 
+    pthread_mutex_lock(&neigh_mutex);
+    // lock the mutex so only one thread manipulates the neighbor table at a time
+
+    // In this loop we are checking if the neighbor already there by comparing its ip address with the stored ip addresses in the neigh_table 
+    for (int i = 0; i < neigh_count; i++) {
+        if (strcmp(neigh_table[i].ip, ip) == 0) {
+            // if the neighbor exists inside the array we need to update the sequence number if it is incremented (check if current sequence is > the sequence for the found ip address)
+            if (seq > neigh_table[i].last_seq) {
+                neigh_table[i].last_seq = seq;
+                neigh_table[i].last_time = time(NULL); //time(NULL) returns the current time so we need to update the time of the neighbor to check if there is a timeout 
+                printf("Updated neighbor %s (seq %u)\n", ip, seq);
+            }
+            pthread_mutex_unlock(&neigh_mutex);// unlocking this mutex so the other threads can work
+            return;
+        }
+    }
+
+    // If the IP address of the current nieghbor is not found in the table we need to check for the capacity of the neigh_table and if needed we need to double the capacity 
+    // Check if we have enough capacity: If capacity is 0, start with 4
+    // Else double the capacity 
+    // realloc changes the size of the allocated memory for neigh_table
+
+    if (neigh_count == neigh_capacity) {
+
+        if (neigh_capacity == 0) {
+            neigh_capacity = 4;
+        } else {
+            neigh_capacity = neigh_capacity * 2;
+        }   
+        neigh_table = realloc(neigh_table, neigh_capacity * sizeof(Neighbor));
+    }
+
+    strcpy(neigh_table[neigh_count].ip, ip);
+    //Fill in the new entry at index neigh_count
+    neigh_table[neigh_count].last_seq = seq;
+    neigh_table[neigh_count].last_time = time(NULL);
+    neigh_count++; //Increment neigh_count
+    printf("Discovered new neighbor %s (seq %u)\n", ip, seq);
+    pthread_mutex_unlock(&neigh_mutex);
+}
+
+
+// This function creates a thread that runs forever, so constantly it will send every 5 seconds a Hello message as a broadcast and it stops if you stop the code 
+void* sender_thread(void *arg) {
+    (void)arg; // this is added because warning in the terminal were noticed  because we are not using the argument but it is needed for the thread function 
+    struct sockaddr_in bcast_addr;
+    //struct sockaddr_in is a structure for IPv4 addresses. it contains: P address , port, address family (IPv4), padding fields
+    memset(&bcast_addr, 0, sizeof(bcast_addr)); //this function memset is used to set every byte inside the struct bcast_addr equal to zero
+    bcast_addr.sin_family = AF_INET; // for IPv4
+    bcast_addr.sin_port = htons(PORT); //htons converts a 16-bit value from the host's native byte order into network byte order which is required by all Internet protocols
+    bcast_addr.sin_addr.s_addr = inet_addr("255.255.255.255"); // broadcast address
+
+    while (1) {
+        // Build HELLO message: "myIP:HELLO:" followed by 2-byte seq in network order
+        char msg[BUF_SIZE];
+        int len = snprintf(msg, sizeof(msg), "%s:HELLO:", my_ip);
+        uint16_t netseq = htons(my_seq);
+        memcpy(msg + len, &netseq, sizeof(netseq));
+        len += sizeof(netseq);
+        if (sendto(sockfd, msg, len, 0, (struct sockaddr*)&bcast_addr, sizeof(bcast_addr)) < 0) { //sendto() sends the HELLO as a UDP datagram to broadcast
+            perror("sendto");
+        } else {
+            printf("Sent HELLO (seq=%u)\n", my_seq);
+        }
+        my_seq++; //Increment sequence number for next HELLO
+        sleep(HELLO_INTERVAL);
+    }
+    return NULL;
+}
+
+//If DvUpdated flag is set, this function builds the distance vector string with getDistanceVector() 
+//and broadcasts it for all neighbors to learn about the updated best path
+void send_dv_if_needed(void) {
+    if (!isDvUpdated()) { //To check if the flag from part 2 changed via dvUpdate(), meaning it is true because the table's best paths changed
+        return;               
+    }
+
+    char *dv = getDistanceVector(); //To build the DV string with the appropriate format             
+    if (!dv) { //In case building the string fails
+        return;
+    }
+
+    //Let's prepare the broadcast destination address
+    struct sockaddr_in bcast; 
+    memset(&bcast, 0, sizeof(bcast));
+    bcast.sin_family= AF_INET;
+    bcast.sin_port= htons(PORT);
+    bcast.sin_addr.s_addr=inet_addr("255.255.255.255");
+
+    if (sendto(sockfd, dv, strlen(dv), 0, (struct sockaddr*)&bcast, sizeof(bcast)) < 0) { //This sends the DV string via UDP to everyone on the local link
+        perror("sendto DV");
+    } else {
+        printf("DV broadcast: %s\n", dv);
+        dvSent(); //To clear the flag to not send the same DV again
+    }
+    free(dv);
+}
+
+//This function will receive UDP packets and react to them if its either HELLOs or DVs
+void* receiver_thread(void *arg) {
+    (void)arg; //To silence the warning as we don't use arg
+    while (1) {
+        char buf[BUF_SIZE]; //This buffer is to hold the bytes received from the netwrok
+        struct sockaddr_in src; 
+        socklen_t srclen = sizeof(src);
+
+        ssize_t n = recvfrom(sockfd, buf, sizeof(buf), 0, (struct sockaddr*)&src, &srclen);
+        if (n < 0) { 
+            perror("recvfrom"); 
+            continue; 
+        }
+
+        //To extract the sender IP
+        char src_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &src.sin_addr, src_ip, sizeof(src_ip));
+
+        if (strcmp(src_ip, my_ip) == 0) {
+            continue; // ignore our own packets
+        }
+        buf[n] = '\0';
+
+        //If the UDP payload contains DV, it will be treated as a DV message
+        if (strstr(buf, ":DV:")) {
+            processDistanceVector(buf); //Part 2 updates the DT and call dvUpdate() inside updateRoute
+            send_dv_if_needed(); //If best paths changed, meaning dvUpdated() is true, we broadcast our DV with the function below
+            continue;
+        }
+
+        // Otherwise the received packet is treated as a HELLO: "<ip>:HELLO:" + 2 raw bytes
+        char *colon = strchr(buf, ':'); //finds the first ':' in the message
+        if (!colon) continue; // if not found we will ignore the packet 
+
+        char *token = colon + 1;
+        if (strncmp(token, "HELLO:", 6) != 0) continue; //token points out to the Hello message and if the Hello message is not there skip
+
+        char *seq_ptr = token + 6;
+
+        // Read the 2-byte sequence number 
+        uint16_t netseq;
+        memcpy(&netseq, seq_ptr, sizeof(netseq));
+        uint16_t seq = ntohs(netseq);
+
+        //Update neighbor table using the actual sender IP from packet
+        add_or_update_neighbor(src_ip, seq);
+
+        //Add or update direct route to the neighbor with cost 1 (Part 2 hook)
+        updateRoute(src_ip, src_ip, 1); //To update or create route destination via src_ip with newCost=1 (direct link)
+        //If best paths changed, broadcast our DV:
+        send_dv_if_needed();
+    }
+    return NULL;
+}
+
+
+void* timeout_thread(void *arg) {
+    (void)arg;
+    while (1) {
+        time_t now = time(NULL);
+        pthread_mutex_lock(&neigh_mutex);
+        for (int i = 0; i < neigh_count; ) { //To iterate through the IP addresses entries. i will be controlled differently, as it may be removed
+            if (difftime(now, neigh_table[i].last_time) > TIMEOUT) {
+                char down_ip[INET_ADDRSTRLEN];
+                strncpy(down_ip, neigh_table[i].ip, sizeof(down_ip)-1); 
+                down_ip[sizeof(down_ip)-1] = '\0';
+                printf("Neighbor %s timed out (no HELLO for %d sec)\n", down_ip, TIMEOUT);
+                neigh_table[i] = neigh_table[--neigh_count];
+                pthread_mutex_unlock(&neigh_mutex);
+
+                //Part 3: tell Part 2 to drop routes via this neighbour, then maybe advertise 
+                removeAllRoutesVia(down_ip); //To tell part 2 to drop routes via this neighbour
+                send_dv_if_needed(); //If part 2 set the dvUpdate() flag, because best path changed, we will call the broadcasting function
+                pthread_mutex_lock(&neigh_mutex);
+                continue; 
+            }
+            i++; //If no IP address was removed we go to the next index of the array
+        }
+        pthread_mutex_unlock(&neigh_mutex);
+
+        sleep(1); //To wait 1 sec before the next check, this should help keep the loop responsive
+    }
+    return NULL;
+}
+
+void detect_ip(void) {
+    struct ifaddrs *ifaddr, *ifa;
+    //ifaddrs is a struct that describes a network interface (like veth-r1) and its addresses
+    //ifaddr will point to the head of a linked list of all interfaces
+    //ifa will be used to walk through (iterate over) that list
+    if (getifaddrs(&ifaddr) == -1) {
+        /*
+        Fills ifaddr with a linked list of all network interfaces and their addresses in this process’s namespace
+        In r1 namespace: you’ll see lo and veth-r1
+        In r2: lo, veth-r2, etc
+        Returns -1 on error*/
+
+        perror("getifaddrs");
+        exit(1);
+    }
+    // this loops over each interface available in ifaddrs
+    for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr &&  ifa->ifa_addr->sa_family == AF_INET && !(ifa->ifa_flags & IFF_LOOPBACK)) {
+            //ifa->ifa_addr makes sure this interface has an address sa_family == AF_INET makes sure that this IPv4 addresses !(ifa->ifa_flags & IFF_LOOPBACK) skips loopback (lo)
+            struct sockaddr_in *sa = (struct sockaddr_in*)ifa->ifa_addr;
+            inet_ntop(AF_INET, &sa->sin_addr, my_ip, sizeof(my_ip)); //sa->sin_addr is the binary IPv4 address and inet_ntop converts it to a human-readable string
+            break;
+        }
+    }
+    freeifaddrs(ifaddr);
+
+    printf("Local IP: %s\n", my_ip);
+}
+
+int main(void) {
+    detect_ip(); //This will fill my_ip
+    set_my_ip(my_ip); //Function from part 2 to start the DV string with the correct sender IP
+
+    //To create the UDP socket
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) { 
+        perror("socket"); 
+        exit(1); 
+    }
+
+    //To enable broadcast
+    int broadcastEnable = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0) { 
+    //setsockopt with SO_BROADCAST turns on permission to send to 255.255.255.255 and put the pointer to 1 to enable broadcast it it was 0 it will disable it
+        perror("setsockopt SO_BROADCAST"); 
+        exit(1);
+    }
+
+    //To bind to the port :5555
+    //To listen for incoming HELLO/DV on port 5555
+    struct sockaddr_in addr; 
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family= AF_INET;
+    addr.sin_addr.s_addr= htonl(INADDR_ANY);
+    addr.sin_port= htons(PORT);
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind"); 
+        exit(1);
+    }
+
+    // Threads: keep the same structure as Part 1
+    pthread_t th_sender, th_receiver, th_timeout;
+    if (pthread_create(&th_sender,NULL, sender_thread,NULL) != 0) { 
+        perror("pthread_create sender");   
+        exit(1); 
+    }
+    if (pthread_create(&th_receiver,NULL, receiver_thread, NULL) != 0) { 
+        perror("pthread_create receiver"); 
+        exit(1); 
+    }
+    if (pthread_create(&th_timeout,NULL, timeout_thread,NULL) != 0) { 
+        perror("pthread_create timeout");  
+        exit(1); 
+    }
+
+    pthread_join(th_sender,NULL);
+    pthread_join(th_receiver,NULL);
+    pthread_join(th_timeout, NULL);
+
+    close(sockfd);
+    return 0;
+}
