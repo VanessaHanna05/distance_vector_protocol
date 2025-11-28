@@ -5,7 +5,7 @@ TARGET          = part2
 TARGET_TEST     = part2_test
 ROUTER_CORE     = router_core
 ROUTER_BONUS    = router_bonus
-ROUTER_MAIN     = part3_ines.c   # IMPORTANT FIX
+ROUTER_MAIN     = part3.c   # IMPORTANT FIX
 
 all: $(ROUTER_CORE) $(ROUTER_BONUS) $(TARGET)
 
