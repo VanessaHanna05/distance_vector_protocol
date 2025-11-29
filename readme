@@ -1,152 +1,214 @@
 
+# Distance Vector Routing – Bonus +  Split Horizon Implementation
 
-# Distance Vector Routing – Updated Part 2 and Integration
+The final setup runs **four routers**:
 
-This repository now contains an updated implementation of **Part 2** and **Part 3** of the Distance Vector (DV) routing protocol used in the Computer Networking lab (Learning Flow 4a).
+* 3 routers inside Linux network namespaces: `r1`, `r2`, `r3`
+* 1 router on the **host** itself (your WSL/Ubuntu), with IP `10.0.0.254`
 
----
+All four are on the same virtual Ethernet LAN and exchange:
 
-## Overview of the New Implementation
+* periodic **HELLO** messages to detect neighbors
+* **Distance Vectors** to compute shortest paths
+* host routing table updates using `ip route replace` and `ip route del`
 
-### Part 1 (Neighbour Detection)
-
-Part 1 is unchanged from before (implemented earlier on another branch).
-It is responsible for sending HELLO messages, detecting missing neighbours, and maintaining the neighbour table.
-Part 3 integrates with this, as before.
-
----
-
-## Updated Part 2 – Distance Table + Distance Vector Logic (Bonus version only)
-
-The previous repository had:
-
-* `part2.c` – the original DV logic (no host routing updates, no split horizon support)
-* `part2_bonus.c` – an extended version with host route updates and helper functions used for split horizon
-
-The new version removes `part2.c` entirely and **keeps only `part2_bonus.c`**, which now serves as the unified Part 2 implementation.
-
-### What Part 2 (bonus version) includes:
-
-1. The Distance Table structure
-
-   * Tracks multiple possible routes per destination
-   * Uses mutex protection for concurrent access
-
-2. Distance Vector generation
-
-   * Creates a DV string with all `(destination, cost)` pairs
-   * Used by Part 3 when broadcasting DVs
-
-3. Processing incoming DV messages
-
-   * Updates routing information
-   * Adjusts costs using “cost = received_cost + 1”
-   * Notifies Part 3 when the best path changes
-
-4. Additional functionality
-
-   * **host route updates** using `ip route replace` and `ip route del`
-   * A helper function (`getBestViaForDest`) used by Part 3 to implement **split horizon**
-     (split horizon is not implemented inside Part 2; the logic is in Part 3)
-
-All the features in the old “bonus” version are now part of the main logic.
+The host participates as a real router: it maintains its own DV table and also updates its Linux routing table.
 
 ---
 
-## Differences from the Previous Version
+## 1. What the code does
 
-### 1. Only one Part 2 file is now used
+### Neighbor detection (Part 1 logic, integrated here)
 
-Old setup:
+Each router:
 
-* `part2.c` (regular)
-* `part2_bonus.c` (extended)
+* broadcasts a HELLO message every 5 seconds
+* records neighbors and their last sequence number
+* times out neighbors after 10 seconds of silence
+* removes all routes that use a dead neighbor as next hop
 
-New setup:
+This is done in `part3.c` using three threads:
 
-* Only `part2_bonus.c` exists
-* All builds link against this file
-* Makefile updated accordingly
+* `sender_thread` – sends HELLOs
+* `receiver_thread` – receives HELLO + DV messages
+* `timeout_thread` – checks for neighbor timeouts
 
-### 2. Split horizon is now always enabled
+### Distance Vector logic (Part 2 + bonus)
 
-Previously, split horizon was not used unless you ran the “bonus” router.
-Now:
+Implemented in `part2_bonus.c`:
 
-* `getBestViaForDest` from Part 2
-* * filtering logic in Part 3
+* maintains a distance table: for each destination, keeps one or more `(next_hop, cost)` entries
 
-ensure that split horizon is active in every DV transmission.
+* processes incoming DV messages, applying the rule:
 
-### 3. host route updates are always enabled
+  ```text
+  new_cost_to_dest_via_sender = received_cost + 1
+  ```
 
-Since the repository now uses the bonus version exclusively, every route change automatically updates the Linux routing table inside each namespace, using:
+* detects when the **best** route to a destination changes and triggers `dvUpdate()`
 
-```
-ip route replace DEST/32 via NEXT_HOP
-ip route del DEST/32
-```
+* uses split horizon when sending DVs (don’t advertise a route back to the neighbor you learned it from)
 
-### 4. Makefile simplified
+* updates the host routing table with:
 
-The Makefile no longer builds a “bonus” and “non-bonus” version.
-All builds use the single Part 2 implementation.
+  * `ip route replace DEST/32 via NEXTHOP`
+  * `ip route del DEST/32` when no routes remain
+
+So this version does not just simulate routing; it actually manipulates routes in the OS (inside the namespaces and on the host).
+
+### Integration / message handling (Part 3)
+
+`part3.c` ties everything together:
+
+* chooses the local IP and broadcast address for each router (e.g. `10.0.0.x` and `10.0.0.255`)
+* sends HELLOs using broadcast
+* receives HELLO and DV messages, and calls into `part2_bonus.c` to update the distance table
+* when `isDvUpdated()` is true, builds and sends a new DV (one per neighbor, with split horizon filtering)
 
 ---
 
-## Compiling the Updated Version
+## 2. Topology
 
-To build everything:
+The script `run_bonus.sh` sets up this virtual topology using Linux network namespaces and veth pairs:
 
-```
+* network namespaces: `r1`, `r2`, `r3`
+* a Linux bridge: `br0`
+* veth interfaces:
+
+  * `r1-veth` ↔ `br0`
+  * `r2-veth` ↔ `br0`
+  * `r3-veth` ↔ `br0`
+  * `veth-h`  ↔ `br0` (host side)
+
+All four routers are on the same subnet, for example:
+
+* `r1`: 10.0.0.1/24
+* `r2`: 10.0.0.2/24
+* `r3`: 10.0.0.3/24
+* `host`: 10.0.0.254/24
+
+Broadcast address used: `10.0.0.255`.
+
+Each router runs the same binary (`router_bonus`).
+
+When everything is up, each router eventually learns about the other three, with hop count 1.
+
+---
+
+## 3. Files
+
+* `part2_bonus.c`
+  Distance Vector implementation + host route updates.
+
+* `part3.c`
+  Neighbor detection, DV sending/receiving, main function, threads.
+
+* `run_bonus.sh`
+  Shell script that:
+
+  * creates namespaces and veth pairs
+  * creates bridge `br0` and connects all routers
+  * assigns IP addresses
+  * runs `router_bonus` in each namespace and on the host (typically in a tmux session).
+
+* `Makefile`
+  Builds the router binary and provides simple helper targets.
+
+
+
+## 5. How to run everything (step by step)
+
+### Step 1 – Build
+
+```bash
 make
 ```
 
-This produces:
+### Step 2 – Run the network testbed
 
-* `part2_bonus` (standalone Part 2 test program)
-* `run_bonus` (the integrated DV router using Part 3 + bonus Part 2)
-
-To build the test version of Part 2:
-
-```
-make test
+```bash
+sudo ./run_bonus.sh
 ```
 
-This creates:
+1. Delete any old namespaces/bridge from previous runs.
+2. Create namespaces `r1`, `r2`, `r3`.
+3. Create bridge `br0`.
+4. Create veth pairs and attach them to `br0` and the namespaces.
+5. Assign IPs in the `10.0.0.0/24` subnet.
+6. Start `router_bonus` in each namespace and on the host.
 
+Depending on how the script is written, it either:
+
+* opens multiple terminal panes (e.g. tmux) with one router per pane
+  or
+* runs them in the background and prints logs.
+
+In the tmux case, you will see four panes:
+
+* top/left: one router (e.g. 10.0.0.1)
+* top/right: another (10.0.0.2)
+* bottom/right: another (10.0.0.3)
+* bottom/left: the host router (10.0.0.254)
+
+You should see output like:
+
+```text
+Local IP = 10.0.0.1
+Computed broadcast address = 10.0.0.255
+Sent HELLO (seq=0)
+Discovered new neighbor 10.0.0.2 (seq 0)
+...
+[host] ip route replace 10.0.0.2/32 via 10.0.0.1
+DV to 10.0.0.2: 10.0.0.1:DV:(10.0.0.3,1):(10.0.0.254,1):
 ```
-part2_bonus_test
-```
 
----
+That means neighbors and DVs are being exchanged.
 
-## Running the Router System
+### Step 3 – Inspect routing tables (optional)
 
-Use the provided script to run the router with Linux network namespaces:
+You can inspect the routing tables inside each namespace:
 
-```
-sudo ./run_core.sh
-```
-
-This script:
-
-* Creates several namespaces
-* Connects them with virtual Ethernet links
-* Starts one instance of `router_core` inside each namespace
-
-You can inspect routes inside a namespace like this:
-
-```
+```bash
 sudo ip netns exec r1 ip route
+sudo ip netns exec r2 ip route
+sudo ip netns exec r3 ip route
+ip route            # on the host
 ```
 
----
-
-## Notes About Limitations
-
-The DV implementation still does not include features such as poison reverse or triggered route poisoning.
-If a router is abruptly terminated (closing the terminal), some temporary incorrect routes may appear because of standard DV behaviour.
-This is normal and expected for this assignment.
+You should see `/32` host routes for the other routers, pointing via the correct next hop.
 
 ---
+
+## 6. How to stop and clean up
+
+### Stop the routers
+
+* To detach from tmux without killing the routers:
+  press `Ctrl+b` then `d`.
+
+### Clean compiled binaries
+
+From the project directory:
+
+```bash
+make clean
+```
+---
+
+## 7. What to look at in the logs
+
+* When the program starts:
+
+  * HELLOs are sent
+  * neighbors are discovered
+  * DVs are exchanged
+
+* When you kill one router (for example, close the `r3` pane):
+
+  * the other routers will show a timeout for `10.0.0.3` after ~10 seconds
+  * routes via `10.0.0.3` are removed
+  * DVs are sent again to reflect the new topology
+  * host routing tables change accordingly
+
+
+
