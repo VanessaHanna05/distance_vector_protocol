@@ -1,94 +1,142 @@
-# Distance Vector Routing – Part 2  
-This repository contains the implementation of **Part 2** of a Distance Vector (DV) routing protocol, as required in the Computer Networking lab (Learning-Flow #4a).
-
-Part 2 is intentionally kept **separate** from Part 1 so each component can be developed, tested, and evaluated independently before final integration.
-
-## Overview
-
-The full DV routing protocol consists of several independent subsystems:
-
-### ✔ Part 1: Neighbour Detection  
-Implemented previously in `part1.c` (on another branch).  
-It is responsible for:
-- Broadcasting HELLO messages every 5 seconds  
-- Receiving HELLOs from neighbors  
-- Detecting link failures (timeout after 10 seconds)  
-- Maintaining a **Neighbour Table**  
-- Ensuring threads do not block and can run concurrently  
-
-Part 1 deals *purely* with discovering which routers are directly connected.
 
 ---
 
-### ✔ Part 2: Distance Table and Distance Vector Processing  
-This branch implements the **Distance Table subsystem**, containing:
+# Distance Vector Routing – Part 2 and Part 3
 
-#### **1. Distance Table Data Structure**
-A dynamic multi entry routing table:
-Destination → [(via_neighbor, cost), (via_neighbor2, cost2), ...]
+This repository contains my implementation of Part 2 and the integration in Part 3 for the Distance Vector (DV) routing protocol used in the networking lab (Learning Flow 4a).
 
-Internally stored as:
-- A list of destinations  
-- For each destination: a list of routes and costs via different neighbors  
-
-#### **2. Distance Vector Generation**  
-Function:
-char* getDistanceVector();
-Produces a DV string in the required format:
-myIP:DV:(dest1,cost1):(dest2,cost2):(dest3,cost3):
-
-This string is:
-- Allocated using `malloc`
-- Ready to be sent via UDP (Part 3)
-- Uses the best known cost (shortest path) for each destination
-
-#### **3. Processing Incoming Distance Vectors**
-Function:
-
-Parses incoming DV messages and updates:
-- Routes to destinations  
-- Costs via the sender  
-- Triggers DV update events if shortest paths change  
-
-All updates follow the rule:
-distance_to_dest_via_sender = received_cost + 1
-
-#### **4. Update Notification Logic**
-Two provided hooks:
-void dvUpdate(); // invoked whenever shortest path changes
-void dvSent(); // used to clear update flag after sending
-
-These will be used later in Part 3 to decide when to broadcast updated vectors.
+Part 1 (neighbour detection) was implemented earlier on a separate branch.
+Part 2 and Part 3 are implemented here.
 
 ---
 
-## Files
+## Part 1 (background)
 
-### `part2.c`
-Contains:
-- Distance table implementation  
-- Route insertion and update logic  
-- DV serialization  
-- DV parsing  
-- Mutex protection for thread safety  
-- Optional test main (enabled using -DTEST_PART2)
+Part 1 is responsible for the HELLO protocol.
+Each router sends a HELLO message every 5 seconds and removes neighbours that have not sent anything for 10 seconds.
+It maintains a neighbour table but does not do any routing by itself.
 
-### `Makefile`
-Builds:
-- `part2` (without test main)
-- `part2_test` (with internal test main enabled)
-
+Part 3 later uses this to know which neighbours exist.
 
 ---
 
-## How to Compile
+## Part 2 – Distance Table and Distance Vector Logic
 
-### Build the standard Part 2 module:
-```bash
+Part 2 implements the actual DV algorithm. The main components are:
+
+### Distance Table
+
+For each destination IP we keep a list of possible routes, each route containing:
+
+* the neighbour used to reach the destination (“via”)
+* the cost for that route (hop-count)
+
+The structure allows storing several possible next-hops for the same destination.
+
+### Generating a Distance Vector
+
+The function `getDistanceVector()` builds a DV message in the required format, for example:
+
+```
+192.168.1.1:DV:(192.168.1.2,1):(192.168.1.3,2):
+```
+
+The string is dynamically allocated and can be sent directly by Part 3.
+
+### Processing a Received Distance Vector
+
+The function `processDistanceVector()` parses an incoming DV message, updates the table, and checks whether the best route to any destination has changed.
+If it has changed, the function `dvUpdate()` is called to notify Part 3 that a new DV needs to be sent.
+
+### Helper Functions
+
+Part 2 also provides:
+
+* `dvSent()` – called after a DV is actually transmitted
+* internal route update functions
+* mutex protection for the table
+
+---
+
+## Compiling Part 2
+
+To build the normal Part 2 module:
+
+```
 make
-This creates:
-./part2
-Build the module with the test main enabled:
+```
+
+To build a version with the internal test main enabled:
+
+```
 make test
-This produces:
-./part2_test
+```
+
+This produces `part2_test`.
+
+---
+
+## Part 3 – Full Integration
+
+Part 3 combines the neighbour detection (HELLO protocol) with the distance vector logic from Part 2.
+It contains:
+
+* the sender thread (periodically sends HELLO messages)
+* the receiver thread (receives HELLO and DV messages)
+* the timeout thread (detects dead neighbours)
+* integration code that updates the distance table whenever links appear or disappear
+* code that sends a DV whenever Part 2 reports that something changed
+
+The main file for Part 3 is `part3.c`.
+
+### Compiling Part 3
+
+You can compile the integrated router using:
+
+```
+make core
+```
+
+or:
+
+```
+make router_core
+```
+
+This produces the executable:
+
+```
+router_core
+```
+
+---
+
+## Running Everything (using the provided script)
+
+The file `run_core.sh` sets up several Linux network namespaces, connects them with virtual interfaces, and starts multiple instances of the router so they behave like separate machines.
+
+To run the whole system:
+
+```
+sudo ./run_core.sh
+```
+
+This will automatically create three router namespaces and start the program in each one.
+The routers will start exchanging HELLO messages and distance vectors on their own.
+
+To inspect a router’s routing table inside a namespace:
+
+```
+sudo ip netns exec r1 ip route
+```
+
+(Replace r1 with r2 or r3.)
+
+---
+
+## Note About Limitations
+
+This project does not implement loop-prevention techniques such as split horizon or poison reverse.
+If a router is simply killed or closed, the remaining routers may temporarily advertise outdated routes, which can cause the classic “count-to-infinity” behaviour.
+This is normal and acceptable for this assignment.
+
