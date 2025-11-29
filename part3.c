@@ -9,6 +9,7 @@
 #include <time.h>
 #include <net/if.h>
 
+
 #ifndef IFF_LOOPBACK
 #define IFF_LOOPBACK 0x0008
 #endif
@@ -21,7 +22,7 @@
 // ======== PART 3 CRITICAL FIX FOR WSL2 ========
 // We dynamically compute the interface broadcast (10.0.0.255)
 // instead of using 255.255.255.255 (WSL2 blocks global broadcast)
-static char broadcast_ip[INET_ADDRSTRLEN] = {0};
+ char broadcast_ip[INET_ADDRSTRLEN] = {0};
 
 // ======== External Part 2 Functions ========
 extern void set_my_ip(const char *ip); 
@@ -45,7 +46,7 @@ static int neigh_capacity = 0;
 
 static pthread_mutex_t neigh_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static char my_ip[INET_ADDRSTRLEN] = {0};
+ char my_ip[INET_ADDRSTRLEN] = {0};
 static int sockfd;
 static uint16_t my_seq = 0;
 
@@ -146,7 +147,75 @@ void* sender_thread(void *arg)
 // ===================================
 // DV SENDER
 // ===================================
+static void choose_local_ip_and_broadcast(char *ip_out, size_t ip_len,
+                                          char *bcast_out, size_t bcast_len)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
+        exit(1);
+    }
 
+    struct sockaddr_in best_addr = {0};
+    struct sockaddr_in best_mask = {0};
+    int found = 0;
+
+    // First pass: prefer 10.0.0.x (our lab network)
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK)
+            continue;
+
+        struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+        char addr_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &sa->sin_addr, addr_str, sizeof(addr_str));
+
+        if (strncmp(addr_str, "10.0.0.", 7) == 0) {
+            best_addr = *sa;
+            if (ifa->ifa_netmask)
+                best_mask = *(struct sockaddr_in *)ifa->ifa_netmask;
+            found = 1;
+            break;
+        }
+    }
+
+    // Second pass: any non-loopback AF_INET (fallback)
+    if (!found) {
+        for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+                continue;
+            if (ifa->ifa_flags & IFF_LOOPBACK)
+                continue;
+
+            struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+            best_addr = *sa;
+            if (ifa->ifa_netmask)
+                best_mask = *(struct sockaddr_in *)ifa->ifa_netmask;
+            found = 1;
+            break;
+        }
+    }
+
+    freeifaddrs(ifaddr);
+
+    if (!found) {
+        fprintf(stderr, "Could not find a non-loopback IPv4 address\n");
+        exit(1);
+    }
+
+    // Compute broadcast = addr | ~netmask
+    uint32_t addr = best_addr.sin_addr.s_addr;
+    uint32_t mask = best_mask.sin_addr.s_addr;
+    uint32_t bcast = addr | ~mask;
+
+    struct in_addr ip_addr, bc_addr;
+    ip_addr.s_addr = addr;
+    bc_addr.s_addr = bcast;
+
+    inet_ntop(AF_INET, &ip_addr, ip_out, ip_len);
+    inet_ntop(AF_INET, &bc_addr, bcast_out, bcast_len);
+}
 void send_dv_if_needed(void)
 {
     if (!isDvUpdated())
@@ -302,37 +371,45 @@ void* timeout_thread(void *arg)
 // AUTO-DETECT IP
 // ===================================
 
-void detect_ip(void)
-{
-    struct ifaddrs *ifaddr, *ifa;
-    getifaddrs(&ifaddr);
+// void detect_ip(void)
+// {
+//     struct ifaddrs *ifaddr, *ifa;
+//     getifaddrs(&ifaddr);
 
-    for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
-        if (ifa->ifa_addr &&
-            ifa->ifa_addr->sa_family == AF_INET &&
-            !(ifa->ifa_flags & IFF_LOOPBACK))
-        {
-            struct sockaddr_in *sa = (struct sockaddr_in*)ifa->ifa_addr;
-            inet_ntop(AF_INET, &sa->sin_addr, my_ip, sizeof(my_ip));
-            break;
-        }
-    }
+//     for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+//         if (ifa->ifa_addr &&
+//             ifa->ifa_addr->sa_family == AF_INET &&
+//             !(ifa->ifa_flags & IFF_LOOPBACK))
+//         {
+//             struct sockaddr_in *sa = (struct sockaddr_in*)ifa->ifa_addr;
+//             inet_ntop(AF_INET, &sa->sin_addr, my_ip, sizeof(my_ip));
+//             break;
+//         }
+//     }
 
-    freeifaddrs(ifaddr);
+//     freeifaddrs(ifaddr);
 
-    printf("Local IP = %s\n", my_ip);
-    compute_broadcast_from_ip(my_ip);   // <-- WSL2 FIX
-}
+//     printf("Local IP = %s\n", my_ip);
+//     compute_broadcast_from_ip(my_ip);   // <-- WSL2 FIX
+// }
 
-// ===================================
-// MAIN
-// ===================================
+// // ===================================
+// // MAIN
+// // ===================================
+
 
 int main(void)
 {
-    detect_ip();
+    // Pick correct interface (namespace or host veth)
+    choose_local_ip_and_broadcast(my_ip, sizeof(my_ip),
+                                  broadcast_ip, sizeof(broadcast_ip));
+
+    printf("Local IP = %s\n", my_ip);
+    printf("Computed broadcast address = %s\n", broadcast_ip);
+
     set_my_ip(my_ip);
 
+    // ---- create socket ----
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) { perror("socket"); exit(1); }
 
@@ -350,6 +427,7 @@ int main(void)
         exit(1);
     }
 
+    // ---- start threads ----
     pthread_t th1, th2, th3;
     pthread_create(&th1, NULL, sender_thread, NULL);
     pthread_create(&th2, NULL, receiver_thread, NULL);
