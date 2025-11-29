@@ -1,15 +1,15 @@
 /*
- * Part 2 BONUS: Distance Table + Kernel Routing Table Integration
+ * Part 2 BONUS: Distance Table + host Routing Table Integration
  *
  * This file is identical to your original part2.c,
  * BUT with the following extra features:
  *
  *   - Every time the BEST route to a destination changes,
- *       → we install/update a real Linux kernel route:
+ *       → we install/update a real Linux host route:
  *           ip route replace DEST/32 via NEXT_HOP
  *
  *   - Every time a destination loses all routes,
- *       → we delete the kernel route:
+ *       → we delete the host route:
  *           ip route del DEST/32
  *
  *   - Nothing changes in the public API:
@@ -24,7 +24,7 @@
  *   You must run the router program as root:
  *      sudo ./router_bonus
  *
- *   kernel commands used:
+ *   host commands used:
  *      system("ip route replace ...");
  *      system("ip route del ...");
  */
@@ -75,10 +75,10 @@ static int getBestCost(int destIndex);
 static const char* getBestVia(int destIndex);
 int getBestViaForDest(const char *dest, char *via_out);  // for split horizon
 
-/* --------------------- KERNEL ROUTE HELPERS (BONUS) --------------------- */
+/* --------------------- host ROUTE HELPERS (BONUS) --------------------- */
 
 /* Apply: ip route replace DEST/32 via NEXT_HOP */
-static void apply_kernel_route(const char *dest, const char *via)
+static void apply_host_route(const char *dest, const char *via)
 
 {
     if (strcmp(dest, my_ip) == 0)
@@ -88,16 +88,16 @@ static void apply_kernel_route(const char *dest, const char *via)
     snprintf(cmd, sizeof(cmd),
              "ip route replace %s/32 via %s", dest, via);
 
-    printf("[KERNEL] %s\n", cmd);
+    printf("[host] %s\n", cmd);
     fflush(stdout);
 
     int ret = system(cmd);
     if (ret == -1)
-        perror("[KERNEL] system(ip route replace)");
+        perror("[host] system(ip route replace)");
 }
 
 /* Delete: ip route del DEST/32 */
-static void delete_kernel_route(const char *dest)
+static void delete_host_route(const char *dest)
 {
     if (strcmp(dest, my_ip) == 0)
         return;
@@ -106,12 +106,12 @@ static void delete_kernel_route(const char *dest)
     snprintf(cmd, sizeof(cmd),
              "ip route del %s/32", dest);
 
-    printf("[KERNEL] %s\n", cmd);
+    printf("host %s\n", cmd);
     fflush(stdout);
 
     int ret = system(cmd);
     if (ret == -1)
-        perror("[KERNEL] system(ip route del)");
+        perror("host system(ip route del)");
 }
 
 /* --------------------- INTERNAL HELPERS --------------------- */
@@ -210,7 +210,7 @@ static void ensureRouteCapacity(DestEntry *d)
 
 /*
  * updateRoute (BONUS):
- *   original logic + kernel route updates
+ *   original logic + host route updates
  */
 void updateRoute(const char *dest, const char *via, int cost)
 {
@@ -255,9 +255,9 @@ void updateRoute(const char *dest, const char *via, int cost)
     {
         dvUpdate();
 
-        /* BONUS: update kernel route */
+        /* BONUS: update host route */
         if (newBestVia && newBestCost >= 0) {
-            apply_kernel_route(dest, newBestVia);
+            apply_host_route(dest, newBestVia);
 
         }
     }
@@ -267,7 +267,7 @@ void updateRoute(const char *dest, const char *via, int cost)
 
 /*
  * removeAllRoutesVia (BONUS):
- *   original logic + kernel route deletion
+ *   original logic + host route deletion
  */
 void removeAllRoutesVia(const char *via)
 {
@@ -290,9 +290,9 @@ void removeAllRoutesVia(const char *via)
             }
         }
 
-        /* No routes left → remove destination + delete kernel route */
+        /* No routes left → remove destination + delete host route */
         if (d->routeCount == 0) {
-            delete_kernel_route(d->dest);
+            delete_host_route(d->dest);
 
             free(d->routes);
             distTable[i] = distTable[--distCount];
@@ -308,9 +308,9 @@ void removeAllRoutesVia(const char *via)
         {
             dvUpdate();
 
-            /* install new best kernel route */
+            /* install new best host route */
             if (newBestVia && newBestCost >= 0) {
-                apply_kernel_route(d->dest, newBestVia);
+                apply_host_route(d->dest, newBestVia);
             }
         }
 

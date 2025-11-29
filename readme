@@ -1,94 +1,152 @@
-# Distance Vector Routing – Part 2  
-This repository contains the implementation of **Part 2** of a Distance Vector (DV) routing protocol, as required in the Computer Networking lab (Learning-Flow #4a).
 
-Part 2 is intentionally kept **separate** from Part 1 so each component can be developed, tested, and evaluated independently before final integration.
 
-## Overview
+# Distance Vector Routing – Updated Part 2 and Integration
 
-The full DV routing protocol consists of several independent subsystems:
-
-### ✔ Part 1: Neighbour Detection  
-Implemented previously in `part1.c` (on another branch).  
-It is responsible for:
-- Broadcasting HELLO messages every 5 seconds  
-- Receiving HELLOs from neighbors  
-- Detecting link failures (timeout after 10 seconds)  
-- Maintaining a **Neighbour Table**  
-- Ensuring threads do not block and can run concurrently  
-
-Part 1 deals *purely* with discovering which routers are directly connected.
+This repository now contains an updated implementation of **Part 2** and **Part 3** of the Distance Vector (DV) routing protocol used in the Computer Networking lab (Learning Flow 4a).
 
 ---
 
-### ✔ Part 2: Distance Table and Distance Vector Processing  
-This branch implements the **Distance Table subsystem**, containing:
+## Overview of the New Implementation
 
-#### **1. Distance Table Data Structure**
-A dynamic multi entry routing table:
-Destination → [(via_neighbor, cost), (via_neighbor2, cost2), ...]
+### Part 1 (Neighbour Detection)
 
-Internally stored as:
-- A list of destinations  
-- For each destination: a list of routes and costs via different neighbors  
-
-#### **2. Distance Vector Generation**  
-Function:
-char* getDistanceVector();
-Produces a DV string in the required format:
-myIP:DV:(dest1,cost1):(dest2,cost2):(dest3,cost3):
-
-This string is:
-- Allocated using `malloc`
-- Ready to be sent via UDP (Part 3)
-- Uses the best known cost (shortest path) for each destination
-
-#### **3. Processing Incoming Distance Vectors**
-Function:
-
-Parses incoming DV messages and updates:
-- Routes to destinations  
-- Costs via the sender  
-- Triggers DV update events if shortest paths change  
-
-All updates follow the rule:
-distance_to_dest_via_sender = received_cost + 1
-
-#### **4. Update Notification Logic**
-Two provided hooks:
-void dvUpdate(); // invoked whenever shortest path changes
-void dvSent(); // used to clear update flag after sending
-
-These will be used later in Part 3 to decide when to broadcast updated vectors.
+Part 1 is unchanged from before (implemented earlier on another branch).
+It is responsible for sending HELLO messages, detecting missing neighbours, and maintaining the neighbour table.
+Part 3 integrates with this, as before.
 
 ---
 
-## Files
+## Updated Part 2 – Distance Table + Distance Vector Logic (Bonus version only)
 
-### `part2.c`
-Contains:
-- Distance table implementation  
-- Route insertion and update logic  
-- DV serialization  
-- DV parsing  
-- Mutex protection for thread safety  
-- Optional test main (enabled using -DTEST_PART2)
+The previous repository had:
 
-### `Makefile`
-Builds:
-- `part2` (without test main)
-- `part2_test` (with internal test main enabled)
+* `part2.c` – the original DV logic (no host routing updates, no split horizon support)
+* `part2_bonus.c` – an extended version with host route updates and helper functions used for split horizon
 
+The new version removes `part2.c` entirely and **keeps only `part2_bonus.c`**, which now serves as the unified Part 2 implementation.
+
+### What Part 2 (bonus version) includes:
+
+1. The Distance Table structure
+
+   * Tracks multiple possible routes per destination
+   * Uses mutex protection for concurrent access
+
+2. Distance Vector generation
+
+   * Creates a DV string with all `(destination, cost)` pairs
+   * Used by Part 3 when broadcasting DVs
+
+3. Processing incoming DV messages
+
+   * Updates routing information
+   * Adjusts costs using “cost = received_cost + 1”
+   * Notifies Part 3 when the best path changes
+
+4. Additional functionality
+
+   * **host route updates** using `ip route replace` and `ip route del`
+   * A helper function (`getBestViaForDest`) used by Part 3 to implement **split horizon**
+     (split horizon is not implemented inside Part 2; the logic is in Part 3)
+
+All the features in the old “bonus” version are now part of the main logic.
 
 ---
 
-## How to Compile
+## Differences from the Previous Version
 
-### Build the standard Part 2 module:
-```bash
+### 1. Only one Part 2 file is now used
+
+Old setup:
+
+* `part2.c` (regular)
+* `part2_bonus.c` (extended)
+
+New setup:
+
+* Only `part2_bonus.c` exists
+* All builds link against this file
+* Makefile updated accordingly
+
+### 2. Split horizon is now always enabled
+
+Previously, split horizon was not used unless you ran the “bonus” router.
+Now:
+
+* `getBestViaForDest` from Part 2
+* * filtering logic in Part 3
+
+ensure that split horizon is active in every DV transmission.
+
+### 3. host route updates are always enabled
+
+Since the repository now uses the bonus version exclusively, every route change automatically updates the Linux routing table inside each namespace, using:
+
+```
+ip route replace DEST/32 via NEXT_HOP
+ip route del DEST/32
+```
+
+### 4. Makefile simplified
+
+The Makefile no longer builds a “bonus” and “non-bonus” version.
+All builds use the single Part 2 implementation.
+
+---
+
+## Compiling the Updated Version
+
+To build everything:
+
+```
 make
-This creates:
-./part2
-Build the module with the test main enabled:
-make test
+```
+
 This produces:
-./part2_test
+
+* `part2_bonus` (standalone Part 2 test program)
+* `run_bonus` (the integrated DV router using Part 3 + bonus Part 2)
+
+To build the test version of Part 2:
+
+```
+make test
+```
+
+This creates:
+
+```
+part2_bonus_test
+```
+
+---
+
+## Running the Router System
+
+Use the provided script to run the router with Linux network namespaces:
+
+```
+sudo ./run_core.sh
+```
+
+This script:
+
+* Creates several namespaces
+* Connects them with virtual Ethernet links
+* Starts one instance of `router_core` inside each namespace
+
+You can inspect routes inside a namespace like this:
+
+```
+sudo ip netns exec r1 ip route
+```
+
+---
+
+## Notes About Limitations
+
+The DV implementation still does not include features such as poison reverse or triggered route poisoning.
+If a router is abruptly terminated (closing the terminal), some temporary incorrect routes may appear because of standard DV behaviour.
+This is normal and expected for this assignment.
+
+---
